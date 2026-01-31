@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="chat-container">
+
+<div class="chat-header">
+<span>Chat with {{ peer }}</span>
+<div>
+<a class="btn back-btn" href="/users">Back</a>
+<a class="btn logout-btn" href="/logout">Logout</a>
+</div>
+</div>
+
+<div class="chat-box">
+{% for m in messages %}
+<div class="bubble {% if m.sender == me %}me{% else %}other{% endif %}">
+<p>{{ m.text }}</p>
+{% if m.file %}
+<a href="/uploads/{{ m.file }}">📎 {{ m.file }}</a>
+{% endif %}
+</div>
+{% endfor %}
+</div>
+
+<form class="chat-input" method="post" enctype="multipart/form-data">
+<input name="message" placeholder="Message">
+<input type="file" name="file">
+<button>Send</button>
+</form>
+
+</div>
+</body>
+</html>

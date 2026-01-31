@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="sidebar">
+<h3>{{ me }}</h3>
+{% for u in users %}
+<a class="contact" href="/chat/{{ u }}">{{ u }}</a>
+{% endfor %}
+<a class="logout" href="/logout">Logout</a>
+</div>
+</body>
+</html>
