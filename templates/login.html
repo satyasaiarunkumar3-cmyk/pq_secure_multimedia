@@ -1,18 +1,88 @@
 <!DOCTYPE html>
 <html>
 <head>
-<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<title>Login</title>
+
+<style>
+body {
+    font-family: Arial;
+    background: linear-gradient(to right, #4facfe, #00f2fe);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    margin: 0;
+}
+
+.box {
+    background: white;
+    padding: 30px;
+    border-radius: 10px;
+    width: 320px;
+    text-align: center;
+}
+
+input {
+    width: 90%;
+    padding: 10px;
+    margin: 8px;
+}
+
+button {
+    background: #4facfe;
+    color: white;
+    border: none;
+    padding: 10px;
+    width: 100%;
+    cursor: pointer;
+}
+
+a {
+    display: block;
+    margin-top: 10px;
+    font-size: 14px;
+}
+
+.error {
+    color: red;
+    font-size: 13px;
+}
+</style>
+
 </head>
+
 <body>
-<div class="card">
-<h2>Login</h2>
-<form method="post">
-<input name="username" placeholder="Username" required>
-<input type="password" name="password" placeholder="Password" required>
-<button>Login</button>
-</form>
-<p class="error">{{ error }}</p>
-<a href="/register">Register</a>
+
+<div class="box">
+    <h2>Login</h2>
+
+    <!-- 🔥 Error Message -->
+    {% if error %}
+        <div class="error">{{ error }}</div>
+    {% endif %}
+
+    <form method="POST" action="/login">
+
+        <input name="username" placeholder="Username" required>
+
+        <input id="password" name="password" type="password" placeholder="Password" required>
+
+        <label style="font-size:12px;">
+            <input type="checkbox" onclick="toggle()"> Show Password
+        </label>
+
+        <button type="submit">Login</button>
+    </form>
+
+    <a href="/register">Create Account</a>
 </div>
+
+<script>
+function toggle(){
+    let p = document.getElementById("password");
+    p.type = p.type === "password" ? "text" : "password";
+}
+</script>
+
 </body>
 </html>
