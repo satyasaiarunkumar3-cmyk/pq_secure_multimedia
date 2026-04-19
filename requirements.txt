@@ -3,7 +3,7 @@ flask-socketio==5.3.6
 python-socketio==5.11.2
 python-engineio==4.9.1
 cryptography==42.0.8
-oqs==0.9.0
+oqs
 Werkzeug==3.0.3
 pyoqs
 eventlet==0.36.1
