@@ -1,153 +1,200 @@
-from flask import Flask, render_template, request, redirect, session, send_file
-import sqlite3, os, hashlib, time
-
-from kyber_kem import kyber_keygen
-from crypto_utils import encrypt_data, decrypt_data
+from flask import Flask, render_template, request, redirect, session, send_from_directory
+from flask_socketio import SocketIO, emit, join_room
+import sqlite3, json, os, hashlib
+from datetime import datetime
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = "secure_chat_key"
+app.secret_key = "secret123"
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(BASE, "chat.db")
-MSG_DIR = os.path.join(BASE, "messages")
-UPLOAD_DIR = os.path.join(BASE, "uploads")
+DB_NAME = "db.db"
+UPLOAD_FOLDER = "static/uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-os.makedirs(MSG_DIR, exist_ok=True)
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+online_users = set()
 
-# ---------- DATABASE ----------
-def check_user(u, p):
-    con = sqlite3.connect(DB)
-    cur = con.cursor()
-    cur.execute("SELECT * FROM users WHERE username=? AND password=?", (u, p))
-    r = cur.fetchone()
-    con.close()
-    return r
+def get_db():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def add_user(u, p):
+def init_db():
+    db = get_db()
+    db.execute("CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)")
+    db.execute("""CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender TEXT,
+        receiver TEXT,
+        ciphertext TEXT,
+        file TEXT,
+        time TEXT,
+        seen INTEGER DEFAULT 0,
+        deleted_for_everyone INTEGER DEFAULT 0
+    )""")
+    db.commit()
+    db.close()
+
+init_db()
+
+def shared_key(a,b):
+    return hashlib.sha256("|".join(sorted([a,b])).encode()).digest()
+
+def encrypt(msg,s,r):
+    key=shared_key(s,r)
+    aes=AESGCM(key)
+    nonce=os.urandom(12)
+    ct=aes.encrypt(nonce,msg.encode(),None)
+    return {"ciphertext":ct.hex(),"nonce":nonce.hex()}
+
+def decrypt(data,s,r):
     try:
-        con = sqlite3.connect(DB)
-        cur = con.cursor()
-        cur.execute("INSERT INTO users(username,password) VALUES(?,?)", (u, p))
-        con.commit()
-        con.close()
-        return True
+        key=shared_key(s,r)
+        aes=AESGCM(key)
+        return aes.decrypt(bytes.fromhex(data["nonce"]),bytes.fromhex(data["ciphertext"]),None).decode()
     except:
-        return False
+        return "[error]"
 
-def all_users():
-    con = sqlite3.connect(DB)
-    cur = con.cursor()
-    cur.execute("SELECT username FROM users")
-    users = [u[0] for u in cur.fetchall()]
-    con.close()
-    return users
-
-# ---------- POST-QUANTUM KEY ----------
-pub, priv = kyber_keygen()
-shared_key = hashlib.sha256(pub).digest()
-
-# ---------- LOGIN ----------
-@app.route("/", methods=["GET", "POST"])
-def login():
-    if request.method == "POST":
-        if check_user(request.form["username"], request.form["password"]):
-            session["user"] = request.form["username"]
-            return redirect("/users")
-        return render_template("login.html", error="Invalid credentials")
+@app.route('/')
+def login_page():
     return render_template("login.html")
 
-# ---------- REGISTER ----------
-@app.route("/register", methods=["GET", "POST"])
+@app.route('/login',methods=['POST'])
+def login():
+    u=request.form['username']
+    p=request.form['password']
+    db=get_db()
+    user=db.execute("SELECT * FROM users WHERE username=? AND password=?",(u,p)).fetchone()
+    if user:
+        session['user']=u
+        return redirect('/chat')
+    return render_template("login.html")
+
+@app.route('/register',methods=['GET','POST'])
 def register():
-    if request.method == "POST":
-        if add_user(request.form["username"], request.form["password"]):
-            return redirect("/")
-        return render_template("register.html", error="User already exists")
+    if request.method=='POST':
+        u=request.form['username']
+        p=request.form['password']
+        db=get_db()
+        try:
+            db.execute("INSERT INTO users VALUES (?,?)",(u,p))
+            db.commit()
+            session['user']=u
+            return redirect('/chat')
+        except:
+            return render_template("register.html")
     return render_template("register.html")
 
-# ---------- USERS ----------
-@app.route("/users")
-def users():
-    if "user" not in session:
-        return redirect("/")
-    me = session["user"]
-    contacts = [u for u in all_users() if u != me]
-    return render_template("users.html", users=contacts, me=me)
-
-# ---------- CHAT ----------
-@app.route("/chat/<peer>", methods=["GET", "POST"])
-def chat(peer):
-    if "user" not in session:
-        return redirect("/")
-
-    me = session["user"]
-    chat_id = "__".join(sorted([me, peer]))
-    chat_dir = os.path.join(MSG_DIR, chat_id)
-    os.makedirs(chat_dir, exist_ok=True)
-
-    # SEND MESSAGE
-    if request.method == "POST":
-        msg = request.form.get("message", "")
-        file = request.files.get("file")
-
-        payload = msg.encode()
-        filename = ""
-
-        if file and file.filename:
-            filename = file.filename
-            payload += b"\n---FILE---\n" + file.read()
-
-        nonce, cipher, tag = encrypt_data(payload, shared_key)
-        ts = str(int(time.time() * 1000))  # ✅ FIXED HERE
-
-        with open(os.path.join(chat_dir, f"{ts}.bin"), "wb") as f:
-            f.write(nonce + tag + cipher)
-
-        with open(os.path.join(chat_dir, f"{ts}.meta"), "w") as f:
-            f.write(f"{me}|{filename}")
-
-        return redirect(f"/chat/{peer}")
-
-    # LOAD HISTORY
-    messages = []
-    for f in sorted(os.listdir(chat_dir)):
-        if f.endswith(".bin"):
-            ts = f.split(".")[0]
-            blob = open(os.path.join(chat_dir, f), "rb").read()
-            plain = decrypt_data(blob[:16], blob[32:], blob[16:32], shared_key)
-
-            meta = os.path.join(chat_dir, f"{ts}.meta")
-            sender, filename = open(meta).read().split("|")
-
-            text = plain
-            filelink = None
-
-            if b"\n---FILE---\n" in plain:
-                text, filedata = plain.split(b"\n---FILE---\n")
-                path = os.path.join(UPLOAD_DIR, filename)
-                open(path, "wb").write(filedata)
-                filelink = filename
-
-            messages.append({
-                "sender": sender,
-                "text": text.decode(),
-                "file": filelink
-            })
-
-    return render_template("chat.html", peer=peer, messages=messages, me=me)
-
-# ---------- DOWNLOAD ----------
-@app.route("/uploads/<filename>")
-def download(filename):
-    return send_file(os.path.join(UPLOAD_DIR, filename), as_attachment=True)
-
-# ---------- LOGOUT ----------
-@app.route("/logout")
+@app.route('/logout')
 def logout():
+    user=session.get('user')
+    if user:
+        online_users.discard(user)
+        socketio.emit("user_status",{"user":user,"status":"offline"})
     session.clear()
-    return redirect("/")
+    return redirect('/')
 
-if __name__ == "__main__":
-    print("🚀 Secure WhatsApp-like Chat running at http://127.0.0.1:5000")
-    app.run(debug=True)
+@app.route('/chat')
+def chat():
+    if 'user' not in session:
+        return redirect('/')
+    return render_template("chat.html",user=session['user'])
+
+@app.route('/users')
+def users():
+    db=get_db()
+    me=session['user']
+    users=db.execute("SELECT username FROM users").fetchall()
+    return {"users":[u[0] for u in users if u[0]!=me]}
+
+@app.route('/upload',methods=['POST'])
+def upload():
+    f=request.files['file']
+    name=str(datetime.now().timestamp()).replace(".","")+"_"+secure_filename(f.filename)
+    f.save(os.path.join(UPLOAD_FOLDER,name))
+    return {"name":f.filename,"path":name,"type":f.content_type}
+
+@app.route('/download/<path:filename>')
+def download_file(filename):
+    return send_from_directory(UPLOAD_FOLDER,filename,as_attachment=True)
+
+@app.route('/clear_chat/<user>',methods=['POST'])
+def clear_chat(user):
+    me=session['user']
+    db=get_db()
+    db.execute("""DELETE FROM messages WHERE (sender=? AND receiver=?) OR (sender=? AND receiver=?)""",(me,user,user,me))
+    db.commit()
+    return {"status":"cleared"}
+
+@app.route('/history/<r>')
+def history(r):
+    s=session['user']
+    db=get_db()
+    rows=db.execute("""SELECT * FROM messages WHERE (sender=? AND receiver=?) OR (sender=? AND receiver=?) ORDER BY id""",(s,r,r,s)).fetchall()
+    out=[]
+    for row in rows:
+        msg="[deleted]" if row["deleted_for_everyone"] else decrypt(json.loads(row["ciphertext"]),row["sender"],row["receiver"])
+        file=json.loads(row["file"]) if row["file"] else None
+        out.append({"id":row["id"],"sender":row["sender"],"msg":msg,"file":file,"time":row["time"],"seen":row["seen"]})
+    return {"messages":out}
+
+@app.route('/delete_message/<int:id>',methods=['POST'])
+def delete_msg(id):
+    db=get_db()
+    db.execute("DELETE FROM messages WHERE id=? AND sender=?",(id,session['user']))
+    db.commit()
+    return {"status":"deleted"}
+
+@app.route('/delete_for_everyone/<int:id>',methods=['POST'])
+def delete_all(id):
+    db=get_db()
+    db.execute("UPDATE messages SET deleted_for_everyone=1 WHERE id=? AND sender=?",(id,session['user']))
+    db.commit()
+    socketio.emit("message_deleted",{"id":id})
+    return {"status":"deleted"}
+
+@socketio.on('connect')
+def connect(auth=None):
+    user=session.get('user')
+    if user:
+        online_users.add(user)
+        join_room(user)
+        socketio.emit("user_status",{"user":user,"status":"online"})
+
+@socketio.on('disconnect')
+def disconnect():
+    user=session.get('user')
+    if user:
+        online_users.discard(user)
+        socketio.emit("user_status",{"user":user,"status":"offline"})
+
+@socketio.on('typing')
+def typing(d):
+    emit("typing",d,room=d['to'])
+
+@socketio.on('seen')
+def seen(d):
+    db=get_db()
+    db.execute("UPDATE messages SET seen=1 WHERE id=?",(d['id'],))
+    db.commit()
+    emit("seen_update",d,room=d['sender'])
+
+@socketio.on('send_message')
+def send(d):
+    s,r=d['sender'],d['receiver']
+    enc=encrypt(d.get('message',"") , s,r)
+    db=get_db()
+    db.execute("INSERT INTO messages (sender,receiver,ciphertext,file,time,seen,deleted_for_everyone) VALUES (?,?,?,?,?,0,0)",
+               (s,r,json.dumps(enc),json.dumps(d.get('file')),datetime.now().isoformat()))
+    db.commit()
+    id=db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    payload={"id":id,"sender":s,"receiver":r,"msg":d.get('message'),"file":d.get('file'),"time":datetime.now().isoformat(),"seen":0}
+
+    emit("receive_message",payload,room=r)
+    emit("receive_message",payload,room=s)
+    emit("delivered",{"id":id},room=s)
+
+if __name__=="__main__":
+    socketio.run(app,debug=True)
