@@ -1,37 +1,259 @@
 <!DOCTYPE html>
 <html>
 <head>
-<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<title>Chat</title>
+<script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+
+<style>
+body { margin:0; font-family:Arial; display:flex; height:100vh; }
+.sidebar { width:25%; border-right:1px solid #ddd; overflow-y:auto; }
+.user { padding:12px; border-bottom:1px solid #eee; cursor:pointer; }
+.user:hover { background:#f5f5f5; }
+
+.chat { flex:1; display:flex; flex-direction:column; }
+
+.header {
+background:#075e54;
+color:white;
+padding:10px;
+display:flex;
+align-items:center;
+}
+
+.messages { flex:1; overflow:auto; padding:10px; background:#ece5dd; }
+
+.msg { max-width:60%; padding:8px; margin:5px; border-radius:10px; }
+.left { background:white; }
+.right { background:#dcf8c6; margin-left:auto; }
+
+.time { font-size:10px; text-align:right; color:gray; }
+.delete-btn { font-size:10px; color:red; cursor:pointer; }
+
+.input { display:flex; padding:10px; background:white; }
+input { flex:1; padding:8px; }
+
+#preview img,#preview video { max-width:150px; margin:5px; border-radius:8px; }
+</style>
 </head>
+
 <body>
 
-<div class="chat-container">
+<div class="sidebar" id="users"></div>
 
-<div class="chat-header">
-<span>Chat with {{ peer }}</span>
-<div>
-<a class="btn back-btn" href="/users">Back</a>
-<a class="btn logout-btn" href="/logout">Logout</a>
-</div>
-</div>
+<div class="chat">
 
-<div class="chat-box">
-{% for m in messages %}
-<div class="bubble {% if m.sender == me %}me{% else %}other{% endif %}">
-<p>{{ m.text }}</p>
-{% if m.file %}
-<a href="/uploads/{{ m.file }}">📎 {{ m.file }}</a>
-{% endif %}
+<div class="header">
+<span id="header">Select Chat</span>
+
+<div style="margin-left:auto; display:flex; gap:10px;">
+<button onclick="clearChat()">Clear Chat</button>
+<button onclick="logout()">Logout</button>
 </div>
-{% endfor %}
 </div>
 
-<form class="chat-input" method="post" enctype="multipart/form-data">
-<input name="message" placeholder="Message">
-<input type="file" name="file">
-<button>Send</button>
-</form>
+<div class="messages" id="chat"></div>
+<div id="typing"></div>
+<div id="preview"></div>
+
+<div class="input">
+<input id="msg" placeholder="Type message...">
+<input type="file" id="file">
+<button onclick="send()">Send</button>
+</div>
 
 </div>
+
+<script>
+const socket = io();
+const user = "{{user}}";
+let selected = null;
+const chat = document.getElementById("chat");
+
+// USERS
+fetch('/users').then(r=>r.json()).then(d=>{
+d.users.forEach(u=>{
+document.getElementById("users").innerHTML += `
+<div class="user" onclick="selectUser('${u}')">
+${u} <span id="status-${u}">offline</span>
+</div>`;
+});
+});
+
+// SELECT USER
+function selectUser(u){
+selected = u;
+document.getElementById("header").innerText = u;
+chat.innerHTML = "";
+
+fetch('/history/'+u)
+.then(r=>r.json())
+.then(d=>d.messages.forEach(render));
+}
+
+// FILE PREVIEW
+document.getElementById("file").addEventListener("change", function(){
+let f=this.files[0];
+let p=document.getElementById("preview");
+p.innerHTML="";
+if(!f) return;
+
+let url=URL.createObjectURL(f);
+
+if(f.type.startsWith("image")){
+p.innerHTML=`<img src="${url}">`;
+}
+else if(f.type.startsWith("video")){
+p.innerHTML=`<video src="${url}" controls></video>`;
+}
+else if(f.type.startsWith("audio")){
+p.innerHTML=`<audio src="${url}" controls></audio>`;
+}
+else if(f.type.includes("pdf")){
+p.innerHTML=`<embed src="${url}" width="150" height="150">`;
+}
+else{
+p.innerHTML=`<p>${f.name}</p>`;
+}
+});
+
+// SEND
+async function send(){
+if(!selected) return;
+
+let msg=document.getElementById("msg").value.trim();
+let file=document.getElementById("file").files[0];
+
+if(!msg && !file) return;
+
+let fileData=null;
+
+if(file){
+let form=new FormData();
+form.append("file",file);
+let res=await fetch("/upload",{method:"POST",body:form});
+fileData=await res.json();
+}
+
+socket.emit("send_message",{
+sender:user,
+receiver:selected,
+message:msg,
+file:fileData
+});
+
+document.getElementById("msg").value="";
+document.getElementById("file").value="";
+document.getElementById("preview").innerHTML="";
+}
+
+// RECEIVE
+socket.on("receive_message", d=>{
+if(d.sender===selected || d.receiver===selected){
+render(d);
+
+if(d.sender!==user){
+socket.emit("seen",{id:d.id,sender:d.sender});
+}
+}
+});
+
+// RENDER
+function render(d){
+let cls = d.sender===user ? "msg right":"msg left";
+let content = d.msg || "";
+
+if(d.file && d.file.path){
+let url="/static/uploads/"+d.file.path;
+let download="/download/"+d.file.path;
+
+if(d.file.type.startsWith("image")){
+content+=`<br><img src="${url}" style="max-width:200px"><br><a href="${download}">⬇ Download</a>`;
+}
+else if(d.file.type.startsWith("video")){
+content+=`<br><video src="${url}" width="200" controls></video><br><a href="${download}">⬇ Download</a>`;
+}
+else if(d.file.type.startsWith("audio")){
+content+=`<br><audio src="${url}" controls></audio><br><a href="${download}">⬇ Download</a>`;
+}
+else if(d.file.type.includes("pdf")){
+content+=`<br><embed src="${url}" width="220" height="250"><br><a href="${download}">⬇ Download PDF</a>`;
+}
+else{
+content+=`<br><a href="${download}">⬇ Download ${d.file.name}</a>`;
+}
+}
+
+let ticks="";
+if(d.sender===user){
+ticks=d.seen?`<span style="color:#34b7f1">✔✔</span>`:`✔`;
+}
+
+let del="";
+if(d.sender===user){
+del=`<div class="delete-btn" onclick="deleteMsg(${d.id})">🗑 Delete</div>`;
+}
+
+chat.innerHTML+=`
+<div id="msg-${d.id}" class="${cls}">
+${content}
+${del}
+<div class="time">${new Date(d.time).toLocaleTimeString()} ${ticks}</div>
+</div>
+`;
+
+chat.scrollTop = chat.scrollHeight;
+}
+
+// DELETE
+function deleteMsg(id){
+let choice=confirm("OK = Delete for everyone\nCancel = Delete for me");
+
+if(choice){
+fetch('/delete_for_everyone/'+id,{method:"POST"});
+}else{
+fetch('/delete_message/'+id,{method:"POST"});
+document.getElementById("msg-"+id)?.remove();
+}
+}
+
+// CLEAR CHAT
+function clearChat(){
+if(!selected) return;
+if(!confirm("Clear chat?")) return;
+
+fetch('/clear_chat/'+selected,{method:"POST"})
+.then(()=>chat.innerHTML="");
+}
+
+// TYPING
+document.getElementById("msg").addEventListener("input",()=>{
+if(selected){
+socket.emit("typing",{to:selected,from:user});
+}
+});
+
+socket.on("typing", d=>{
+if(d.from===selected){
+document.getElementById("typing").innerText="typing...";
+setTimeout(()=>document.getElementById("typing").innerText="",1000);
+}
+});
+
+// ONLINE STATUS
+socket.on("user_status", d=>{
+let el=document.getElementById("status-"+d.user);
+if(el){
+el.innerText=d.status;
+el.style.color=d.status==="online"?"green":"gray";
+}
+});
+
+// LOGOUT
+function logout(){
+socket.disconnect();
+window.location.href="/logout";
+}
+</script>
+
 </body>
 </html>
