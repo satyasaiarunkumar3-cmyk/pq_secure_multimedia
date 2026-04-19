@@ -5,5 +5,4 @@ python-engineio==4.9.1
 cryptography==42.0.8
 oqs
 Werkzeug
-pyoqs
 eventlet
